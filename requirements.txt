@@ -1,0 +1,12 @@
+streamlit
+pandas
+numpy
+matplotlib
+plotly
+scikit-learn
+tensorflow
+statsmodels
+pmdarima
+scipy
+seaborn
+watchdog
