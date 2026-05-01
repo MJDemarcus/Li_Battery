@@ -1,10 +1,21 @@
-import tensorflow as tf
 import numpy as np
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout
+    _TF_AVAILABLE = True
+except ImportError:
+    _TF_AVAILABLE = False
+    tf = None
+    Sequential = None
+    LSTM = None
+    Dense = None
+    Dropout = None
 
 class BatteryLSTM:
     def __init__(self, input_shape, units=50, dropout_rate=0.2, demo_mode=False):
+        if not _TF_AVAILABLE:
+            raise ImportError("TensorFlow is required for BatteryLSTM. Please install 'tensorflow'.")
         self.model = Sequential()
         
         if demo_mode:
