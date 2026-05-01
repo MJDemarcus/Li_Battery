@@ -4,9 +4,10 @@ numpy
 matplotlib
 plotly
 scikit-learn
-tensorflow
+tensorflow-cpu
 statsmodels
 pmdarima
 scipy
 seaborn
 watchdog
+prophet
