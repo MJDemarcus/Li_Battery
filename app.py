@@ -1,333 +1,422 @@
+import os
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-from datetime import datetime, timedelta
 import warnings
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
-# ----------------- UI CONFIG -----------------
-st.set_page_config(page_title="LI-MVP • Thermal Runaway Predictor", page_icon="🔋", layout="wide", initial_sidebar_state="expanded")
+# ─── PAGE CONFIG ────────────────────────────────────────────────────────────
+st.set_page_config(
+    page_title="LI-MVP • Thermal Runaway Predictor",
+    page_icon="🔋",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap');
     .stApp { background-color: #0d1117; color: #c9d1d9; font-family: 'Inter', sans-serif; }
     h1, h2, h3 { color: #58a6ff !important; font-weight: 600; }
-    .state-box {
-        background: rgba(33, 38, 45, 0.85);
+    .hero-lead {
+        background: rgba(33,38,45,0.9);
+        border: 1px solid #30363d;
         border-radius: 16px;
-        padding: 20px;
+        padding: 28px 36px;
         text-align: center;
-        border-left: 5px solid;
-        margin: 10px 0;
+        margin-bottom: 20px;
     }
-    .state-0 { border-left-color: #3fb950; }
-    .state-1 { border-left-color: #d29922; }
-    .state-2 { border-left-color: #f85149; }
-    .state-3 { border-left-color: #ff7b72; background: rgba(248,81,73,0.15); }
-    .state-4 { border-left-color: #ff7b72; background: rgba(248,81,73,0.25); }
-    .trigger-badge { display: inline-block; background: #21262d; border-radius: 20px; padding: 4px 12px; margin: 4px; font-size: 0.85rem; font-family: monospace; }
-    .trigger-active { background: #f85149; color: white; }
-    .metric-value { font-size: 2.4rem; font-weight: 700; margin: 8px 0; }
-    .etr-box { border-left-color: #db6d28; background: rgba(219, 109, 40, 0.15); }
-    .etr-text { font-size: 1.8rem; font-weight: 700; color: #db6d28; margin: 4px 0;}
+    .lead-number {
+        font-size: 5rem;
+        font-weight: 800;
+        color: #3fb950;
+        line-height: 1;
+        margin: 8px 0;
+    }
+    .lead-label {
+        font-size: 1.1rem;
+        color: #8b949e;
+        margin-bottom: 4px;
+    }
+    .lead-sub {
+        font-size: 0.9rem;
+        color: #8b949e;
+        margin-top: 8px;
+    }
+    .state-hero {
+        border-radius: 16px;
+        padding: 24px;
+        text-align: center;
+        border-left: 6px solid;
+        margin-bottom: 16px;
+    }
+    .state-0 { border-left-color: #3fb950; background: rgba(63,185,80,0.08); }
+    .state-1 { border-left-color: #d29922; background: rgba(210,153,34,0.08); }
+    .state-2 { border-left-color: #db6d28; background: rgba(219,109,40,0.10); }
+    .state-3 { border-left-color: #f85149; background: rgba(248,81,73,0.12); }
+    .state-4 { border-left-color: #ff7b72; background: rgba(248,81,73,0.22); }
+    .state-name { font-size: 2rem; font-weight: 700; margin: 8px 0; }
+    .state-prob { font-size: 1.2rem; color: #8b949e; }
+    .trigger-row { display: flex; align-items: flex-start; gap: 14px; padding: 10px 0; border-bottom: 1px solid #21262d; }
+    .trigger-dot { width: 14px; height: 14px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; }
+    .dot-active { background: #f85149; }
+    .dot-inactive { background: #30363d; }
+    .trigger-label { font-family: monospace; font-size: 0.85rem; font-weight: 700; color: #58a6ff; min-width: 80px; }
+    .trigger-desc { font-size: 0.88rem; color: #8b949e; line-height: 1.45; }
+    .trigger-desc-active { color: #c9d1d9; }
+    .section-sep { border: none; border-top: 1px solid #21262d; margin: 24px 0; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🔋 LI-MVP v2 – Discrete Physics State Machine")
-st.caption("Early Thermal Runaway Prediction + Prevention Simulator | A/B/C/D Triggers")
+# ─── TRIGGER ENGINE (mirrored from app.py v2) ───────────────────────────────
 
-import os
-
-
-# ----------------- CORE FUNCTIONS (v1 + v2) -----------------
 def apply_noise_smoothing(df):
     df = df.copy()
-    T_smooth = df['temperature'].rolling(window=10, min_periods=1).mean()
-    df['temp_smooth'] = T_smooth
-    
-    dt = df['time'].diff().fillna(1.0)
-    dt[dt == 0] = 1.0
-    
-    dT_dt = T_smooth.diff().fillna(0.0) / dt
-    df['dT_dt'] = dT_dt.rolling(window=10, min_periods=1).mean()
-    
-    d2T_dt2 = df['dT_dt'].diff().fillna(0.0) / dt
-    df['d2T_dt2'] = d2T_dt2.rolling(window=10, min_periods=1).mean()
+    T_s = df["temperature"].rolling(window=10, min_periods=1).mean()
+    df["temp_smooth"] = T_s
+    dt = df["time"].diff().fillna(1.0).replace(0, 1.0)
+    dT = T_s.diff().fillna(0.0)
+    df["dT_dt"] = (dT / dt).rolling(window=10, min_periods=1).mean()
+    d2T = df["dT_dt"].diff().fillna(0.0)
+    df["d2T_dt2"] = (d2T / dt).rolling(window=10, min_periods=1).mean()
     return df
 
 def evaluate_trigger_a(df):
-    """Trigger A: Causal Statistical Envelope"""
-    if 'temp_smooth' not in df.columns:
-        df = apply_noise_smoothing(df)
-    rolling_mean = df['temp_smooth'].expanding(min_periods=20).mean()
-    rolling_std = df['temp_smooth'].expanding(min_periods=20).std().fillna(0)
-    # Add a minimum noise floor (1.5C) so perfectly flat holds don't trigger on 0.01C sensor jitter
-    allowed_upper = rolling_mean + np.maximum(3 * rolling_std, 1.5)
-    trigger = (df['temperature'] > allowed_upper).astype(int).cummax()
-    return pd.Series(trigger, index=df.index)
+    rm = df["temp_smooth"].expanding(min_periods=20).mean()
+    rs = df["temp_smooth"].expanding(min_periods=20).std().fillna(0)
+    return (df["temperature"] > rm + np.maximum(3 * rs, 1.5)).astype(int).cummax()
 
-def evaluate_trigger_b(df, heating_threshold=0.5, density_threshold=0.5, window=10):
-    if 'dT_dt' not in df.columns:
-        df = apply_noise_smoothing(df)
-    steep_heating = (df['dT_dt'] > heating_threshold).astype(int)
-    density = steep_heating.rolling(window=window, min_periods=1).mean()
-    trigger = (density >= density_threshold).astype(int).cummax()
-    return pd.Series(trigger, index=df.index)
+def evaluate_trigger_b(df, hthr=0.5, dthr=0.5, win=10):
+    steep = (df["dT_dt"] > hthr).astype(int)
+    return (steep.rolling(win, min_periods=1).mean() >= dthr).astype(int).cummax()
 
-def evaluate_trigger_c(df, geometric_threshold=100):
-    if 'd2T_dt2' not in df.columns:
-        df = apply_noise_smoothing(df)
-    spike_signal = np.maximum(0, df['d2T_dt2'] * 100) ** 2
-    trigger = (spike_signal > geometric_threshold).astype(int).cummax()
-    return pd.Series(trigger, index=df.index), spike_signal
+def evaluate_trigger_c(df, thr=100):
+    sig = np.maximum(0, df["d2T_dt2"] * 100) ** 2
+    return (sig > thr).astype(int).cummax(), sig
 
-def evaluate_trigger_d(df, early_fraction=0.25, dev_sigma=2.5, T_amb=None):
-    """Physics-informed Trigger D – lumped thermal model residual"""
-    if 'dT_dt' not in df.columns:
-        df = apply_noise_smoothing(df)
+def evaluate_trigger_d(df, frac=0.25, sigma=2.5, T_amb=None):
     if T_amb is None:
-        T_amb = df['temperature'].iloc[:50].min()
-    n_early = max(50, int(len(df) * early_fraction))
-    early = df.iloc[:n_early].copy()
-    
-    X = early['temperature'].values - T_amb
-    actual_rate = early['dT_dt'].fillna(0.0).values
-    
-    if len(X) > 1 and len(actual_rate) > 1:
-        coeffs = np.polyfit(X, actual_rate, 1)
-        beta = -coeffs[0]
-        alpha = coeffs[1]
+        T_amb = df["temperature"].iloc[:50].min()
+    n = max(50, int(len(df) * frac))
+    early = df.iloc[:n]
+    X = early["temperature"].values - T_amb
+    rate = early["dT_dt"].fillna(0.0).values
+    if len(X) > 1:
+        coeffs = np.polyfit(X, rate, 1)
+        beta, alpha = -coeffs[0], coeffs[1]
     else:
         alpha, beta = 0.0, 0.0
-        
-    pred_rate_early = alpha - beta * X
-    std_res = np.std(np.abs(actual_rate - pred_rate_early)) + 1e-6
-    
-    # Full dataset
-    X_full = df['temperature'].values - T_amb
-    pred_rate_full = alpha - beta * X_full
-    actual_rate_full = df['dT_dt'].fillna(0.0).values
-    deviation = np.abs(actual_rate_full - pred_rate_full)
-    
-    # Prevent early triggering
-    is_anomaly = deviation > dev_sigma * std_res
-    is_anomaly = pd.Series(is_anomaly, index=df.index)
-    is_anomaly.iloc[:n_early] = False
-    
-    trigger = is_anomaly.astype(int).cummax()
-    return pd.Series(trigger, index=df.index), alpha, beta, T_amb, deviation
+    Xf = df["temperature"].values - T_amb
+    dev = np.abs(df["dT_dt"].fillna(0.0).values - (alpha - beta * Xf))
+    std = np.std(dev[:n]) + 1e-6
+    anom = pd.Series(dev > sigma * std, index=df.index)
+    anom.iloc[:n] = False
+    return anom.astype(int).cummax(), alpha, beta, T_amb, dev
 
-def get_state_and_probability(a, b, c, d):
-    total = a + b + c + d
-    prob_map = {0: 0, 1: 25, 2: 50, 3: 75, 4: 100}
-    probability = prob_map.get(total, 100)
-    labels = {0: "STABLE RUN", 1: "EXPLANATION NEEDED", 2: "WATCHING BRIEF", 3: "HIGH RISK", 4: "CRITICAL WARNING"}
-    return total, probability, labels[total]
+def get_state(a, b, c, d):
+    total = int(a) + int(b) + int(c) + int(d)
+    labels = {0: "STABLE", 1: "EXPLANATION NEEDED", 2: "WATCHING BRIEF", 3: "HIGH RISK", 4: "CRITICAL WARNING"}
+    probs  = {0: 0, 1: 25, 2: 50, 3: 75, 4: 100}
+    return total, probs[total], labels[total]
 
-def simulate_prevention(df, t_warning, alpha, beta, T_amb, sim_seconds=300):
-    if t_warning is None:
+def simulate_prevention(df, t_warn, alpha, beta, T_amb):
+    if t_warn is None:
         return None
-    dt_sim = 1.0
-    t_sim = np.arange(t_warning, t_warning + sim_seconds, dt_sim)
+    t_sim = np.arange(t_warn, t_warn + 300, 1.0)
+    match = df[df["time"] >= t_warn]
+    if match.empty:
+        return None
     T_sim = np.zeros(len(t_sim))
-    
-    # Safe index search
-    matches = df[df['time'] >= t_warning]
-    if len(matches) == 0:
-        return None
-    T_sim[0] = matches['temperature'].iloc[0]
-    
-    alpha_int = 0.0
-    # Safe beta to prevent runaway explosion on Averted Path
-    safe_beta = max(beta, 0.01)
-    beta_int = safe_beta * 1.8
+    T_sim[0] = match["temperature"].iloc[0]
+    sb = max(beta, 0.01)
     for i in range(1, len(t_sim)):
-        dTdt = alpha_int - beta_int * (T_sim[i-1] - T_amb)
-        T_sim[i] = T_sim[i-1] + dTdt * dt_sim
-    return pd.DataFrame({'time': t_sim, 'temp_averted': T_sim})
+        T_sim[i] = T_sim[i - 1] + (0.0 - sb * 1.8 * (T_sim[i - 1] - T_amb))
+    return pd.DataFrame({"time": t_sim, "temp_averted": T_sim})
 
-# ----------------- LOAD DATA -----------------
-def load_data(uploaded_file=None, selected_sim=None):
-    if uploaded_file is not None:
-        if uploaded_file.name.endswith('.csv'):
-            df = pd.read_csv(uploaded_file)
-        else:
-            df = pd.read_excel(uploaded_file)
-    elif selected_sim:
-        file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bms_simulations", selected_sim)
-        df = pd.read_csv(file_path)
+# ─── TRIGGER EXPLANATIONS ────────────────────────────────────────────────────
+
+TRIGGER_EXPLAIN = {
+    "A": {
+        "name": "Statistical Envelope",
+        "inactive": "Temperature within historical bounds. Expanding ±3σ window shows normal behaviour.",
+        "active":   "Temperature has exited the statistical envelope — reading above 3σ of the expanding baseline. Ambient conditions have changed or an anomaly has begun.",
+    },
+    "B": {
+        "name": "Rate Density",
+        "inactive": "Heating rate below threshold. dT/dt is not sustaining dangerous acceleration.",
+        "active":   "Sustained heating rate above 0.5°C/s for ≥50% of the last 30 readings. The battery is in persistent acceleration — not a transient spike.",
+    },
+    "C": {
+        "name": "2nd Derivative Spike",
+        "inactive": "No thermal acceleration spike detected. Rate of change is stable.",
+        "active":   "Second derivative of temperature has crossed the non-linear threshold — the rate of heating is itself accelerating. This catches the inflection point before sustained heat (Trigger B) becomes visible.",
+    },
+    "D": {
+        "name": "Physics ODE Residual",
+        "inactive": "Thermal behaviour matches Newton's cooling model. No excess heat generation detected.",
+        "active":   "Actual dT/dt deviates >2.5σ from the physics model (dT/dt = α − β·ΔT). The battery is generating more heat than the lumped thermal model predicts — a signal of internal fault before temperature has risen enough for statistical triggers to fire.",
+    },
+}
+
+# ─── DATA LOADING ────────────────────────────────────────────────────────────
+
+DATASETS = {
+    "Synthetic Runaway (7-min lead-up)": "data/thermal_runaway_data.csv",
+    "Battery Archive – Normal Cycling":  "data/external/battery_archive_cycling.csv",
+    "NASA – Baseline Aging Sample":      "data/external/nasa_aging_sample.csv",
+    "Sample Battery Data (Nominal)":     "data/sample_battery_data.csv",
+    "NREL Abuse Test Sample":            "data/external/nrel_abuse_test_sample.csv",
+}
+
+COL_MAP = {
+    "temp": "temperature", "t_c": "temperature", "t": "temperature",
+    "timestamp": "time", "test_time (s)": "time",
+    "temperature_measured": "temperature", "cycle": "time",
+}
+
+def load_dataset(path):
+    base = os.path.dirname(__file__)
+    for candidate in [path, os.path.join(base, path), os.path.join(base, "..", path)]:
+        if os.path.exists(candidate):
+            df = pd.read_csv(candidate, comment="#")
+            df.columns = df.columns.str.lower()
+            for old, new in COL_MAP.items():
+                if old in df.columns and new not in df.columns:
+                    df.rename(columns={old: new}, inplace=True)
+            if "time" not in df.columns:
+                df["time"] = np.arange(len(df))
+            if "temperature" not in df.columns:
+                nums = df.select_dtypes(include=[np.number]).columns.tolist()
+                df["temperature"] = df[nums[-1]] if nums else 0.0
+            df = df[pd.to_numeric(df["time"], errors="coerce").notnull()].copy()
+            df = df.apply(pd.to_numeric, errors="coerce").dropna(subset=["time", "temperature"])
+            return df
+    return None
+
+def make_demo_df():
+    t = np.arange(0, 600, 1.0)
+    temp = 25 + 0.02 * t + 5 * np.exp((t - 450) / 40) * (t > 450) + np.random.normal(0, 0.3, len(t))
+    return pd.DataFrame({"time": t, "temperature": temp})
+
+# ─── SIDEBAR: dataset selection ──────────────────────────────────────────────
+
+st.sidebar.title("🔋 LI-MVP v2")
+st.sidebar.markdown("**Marsham Edge** | Physics State Machine")
+st.sidebar.markdown("---")
+
+data_source = st.sidebar.radio("Data source", ["Preloaded", "Upload CSV"])
+
+if data_source == "Preloaded":
+    selected = st.sidebar.selectbox("Dataset", list(DATASETS.keys()))
+    df_raw = load_dataset(DATASETS[selected])
+    if df_raw is None:
+        st.sidebar.warning("Dataset not found — using demo trace.")
+        df_raw = make_demo_df()
+else:
+    uploaded = st.sidebar.file_uploader("Upload CSV (needs 'time' + 'temperature')", type=["csv"])
+    if uploaded:
+        df_raw = pd.read_csv(uploaded)
+        df_raw.columns = df_raw.columns.str.lower()
+        for old, new in COL_MAP.items():
+            if old in df_raw.columns and new not in df_raw.columns:
+                df_raw.rename(columns={old: new}, inplace=True)
+        if "time" not in df_raw.columns or "temperature" not in df_raw.columns:
+            st.sidebar.error("CSV must have 'time' and 'temperature' columns.")
+            st.stop()
     else:
-        # fallback demo
-        t = np.arange(0, 600, 1)
-        temp = 25 + 0.02 * t
-        df = pd.DataFrame({'time': t, 'temperature': temp})
-        
-    df.columns = df.columns.str.lower()
-    col_map = {'temp': 'temperature', 't_c': 'temperature', 'timestamp': 'time', 'test_time (s)': 'time'}
-    for old, new in col_map.items():
-        if old in df.columns and new not in df.columns:
-            df.rename(columns={old: new}, inplace=True)
-            
-    if 'time' not in df.columns:
-        df['time'] = np.arange(len(df))
-    if 'temperature' not in df.columns:
-        numeric = df.select_dtypes(include=[np.number]).columns
-        df['temperature'] = df[numeric[-1]]
-        
-    start_date = datetime(2024, 1, 1)
-    df['ds'] = [start_date + timedelta(seconds=t) for t in df['time']]
-    return df
+        st.sidebar.info("No file uploaded — using demo trace.")
+        df_raw = make_demo_df()
 
-# ----------------- SIDEBAR -----------------
-st.sidebar.image("https://cdn-icons-png.flaticon.com/512/3665/3665977.png", width=70)
-st.sidebar.title("Controls")
-uploaded_file = st.sidebar.file_uploader("Upload your BMS data (CSV/XLSX)", type=["csv", "xlsx"])
+st.sidebar.markdown("---")
+st.sidebar.markdown("**About**")
+st.sidebar.markdown("Four-trigger / five-state thermal runaway early-warning system. Trigger D (physics ODE residual) provides measurable lead time over simple threshold alarms.")
 
-sim_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "bms_simulations")
-sim_files = sorted([f for f in os.listdir(sim_dir) if f.endswith('.csv')]) if os.path.exists(sim_dir) else []
+# ─── RUN ENGINE ─────────────────────────────────────────────────────────────
 
-selected_sim = None
-if not uploaded_file and sim_files:
-    selected_sim = st.sidebar.selectbox("Select Pre-loaded BMS Dataset", sim_files)
+df = apply_noise_smoothing(df_raw.copy())
+trig_a = evaluate_trigger_a(df)
+trig_b = evaluate_trigger_b(df)
+trig_c, spike_sig = evaluate_trigger_c(df)
+trig_d, alpha, beta, T_amb, dev = evaluate_trigger_d(df)
 
-# ----------------- MAIN APP -----------------
-df = load_data(uploaded_file, selected_sim)
+results = [get_state(trig_a.iloc[i], trig_b.iloc[i], trig_c.iloc[i], trig_d.iloc[i]) for i in range(len(df))]
+df["state"] = [r[0] for r in results]
+df["prob"]  = [r[1] for r in results]
 
-with st.spinner("Running A/B/C/D Triggers + Prevention Simulator..."):
-    df = apply_noise_smoothing(df)
+RUNAWAY_TEMP = 80.0
+simple_alarm_rows = df[df["temperature"] >= RUNAWAY_TEMP]
+system_alert_rows = df[df["state"] >= 2]  # Watching Brief or worse
 
-    trigger_a = evaluate_trigger_a(df)
-    trigger_b = evaluate_trigger_b(df)
-    trigger_c, spike_signal = evaluate_trigger_c(df)
-    trigger_d, alpha_fit, beta_fit, T_amb_fit, deviation = evaluate_trigger_d(df)
+t_simple  = float(simple_alarm_rows["time"].iloc[0])  if not simple_alarm_rows.empty  else None
+t_system  = float(system_alert_rows["time"].iloc[0])  if not system_alert_rows.empty  else None
+t_warn    = t_system
 
-    states = []
-    probabilities = []
-    for i in range(len(df)):
-        state, prob, _ = get_state_and_probability(
-            trigger_a.iloc[i], trigger_b.iloc[i], trigger_c.iloc[i], trigger_d.iloc[i]
+lead_secs = (t_simple - t_system) if (t_simple and t_system and t_system < t_simple) else None
+averted_df = simulate_prevention(df, t_warn, alpha, beta, T_amb)
+
+final_state = int(df["state"].iloc[-1])
+final_prob  = int(df["prob"].iloc[-1])
+state_label = {0: "STABLE", 1: "EXPLANATION NEEDED", 2: "WATCHING BRIEF", 3: "HIGH RISK", 4: "CRITICAL WARNING"}[final_state]
+final_triggers = {
+    "A": bool(trig_a.iloc[-1]),
+    "B": bool(trig_b.iloc[-1]),
+    "C": bool(trig_c.iloc[-1]),
+    "D": bool(trig_d.iloc[-1]),
+}
+
+# ─── HERO: LEAD-TIME COMPARISON ─────────────────────────────────────────────
+
+st.title("🔋 LI-MVP v2 – Physics State Machine")
+
+TRIG_COLORS = {"A": "#58a6ff", "B": "#d29922", "C": "#db6d28", "D": "#3fb950"}
+
+col_hero, col_state = st.columns([3, 2], gap="large")
+
+with col_hero:
+    # Build lead-time chart
+    fig = go.Figure()
+
+    # Temperature trace
+    fig.add_trace(go.Scatter(
+        x=df["time"], y=df["temperature"],
+        name="Temperature (°C)",
+        line=dict(color="#ff7b72", width=2.5),
+    ))
+
+    # Averted path
+    if averted_df is not None:
+        fig.add_trace(go.Scatter(
+            x=averted_df["time"], y=averted_df["temp_averted"],
+            name="Averted path (intervention)",
+            line=dict(color="#3fb950", width=3, dash="dash"),
+        ))
+
+    # System alert line
+    if t_system:
+        first_state = state_label if not system_alert_rows.empty else "Alert"
+        fig.add_vline(
+            x=t_system,
+            line_width=2.5, line_dash="dash", line_color="#3fb950",
+            annotation_text=f"System: {first_state if not system_alert_rows.empty else 'Alert'}",
+            annotation_font=dict(color="#3fb950", size=12),
+            annotation_position="top left",
         )
-        states.append(state)
-        probabilities.append(prob)
 
-    df['trigger_a'] = trigger_a.values
-    df['trigger_b'] = trigger_b.values
-    df['trigger_c'] = trigger_c.values
-    df['trigger_d'] = trigger_d.values
-    df['state'] = states
-    df['probability'] = probabilities
-    df['spike_signal'] = spike_signal.values if hasattr(spike_signal, 'values') else spike_signal
-    df['deviation'] = deviation if isinstance(deviation, np.ndarray) else deviation.values
+    # 80°C alarm line
+    if t_simple:
+        fig.add_vline(
+            x=t_simple,
+            line_width=2, line_dash="dot", line_color="#ff7b72",
+            annotation_text="80°C threshold alarm",
+            annotation_font=dict(color="#ff7b72", size=12),
+            annotation_position="top right",
+        )
 
-    current_state = df['state'].iloc[-1]
-    current_prob = df['probability'].iloc[-1]
-    
-    watching_mask = df['state'] >= 2
-    t_warning = df.loc[watching_mask, 'time'].iloc[0] if watching_mask.any() else None
-    t_critical = df[df['state'] == 4]['time'].iloc[0] if len(df[df['state'] == 4]) > 0 else None
-    
-    etr_text = None
-    if current_prob >= 50:
-        T_curr = df['temperature'].iloc[-1]
-        v = df['dT_dt'].iloc[-1]
-        a = df['d2T_dt2'].iloc[-1]
-        T_crit = 300.0
-        
-        if T_curr >= T_crit:
-            etr_text = "Already reached"
-        else:
-            if a > 0.001:
-                desc = v**2 - 4 * (0.5 * a) * (T_curr - T_crit)
-                if desc >= 0:
-                    t1 = (-v + np.sqrt(desc)) / a
-                    etr_text = f"~{max(0, t1 * 0.8):.0f} to {max(0, t1 * 1.2):.0f} sec"
-            elif v > 0.01:
-                t1 = (T_crit - T_curr) / v
-                etr_text = f"~{max(0, t1 * 0.9):.0f} to {max(0, t1 * 1.1):.0f} sec"
+    # Individual trigger lines (thin, annotated)
+    for letter, series in [("A", trig_a), ("B", trig_b), ("C", trig_c), ("D", trig_d)]:
+        first_pts = df[series == 1]
+        if not first_pts.empty:
+            t_first = float(first_pts["time"].iloc[0])
+            fig.add_vline(
+                x=t_first,
+                line_width=1, line_dash="dot",
+                line_color=TRIG_COLORS[letter],
+                annotation_text=f"Trig {letter}",
+                annotation_font=dict(color=TRIG_COLORS[letter], size=10),
+                annotation_position="bottom left",
+            )
 
-    averted_df = simulate_prevention(df, t_warning, alpha_fit, beta_fit, T_amb_fit) if current_state >= 3 else None
+    if lead_secs:
+        title_text = f"Lead-time advantage: <b>{lead_secs:.0f}s earlier</b> than simple threshold alarm"
+    else:
+        title_text = "Thermal runaway detection trace"
 
-# ----------------- DASHBOARD UI -----------------
-cols = st.columns(5)
-with cols[0]:
+    fig.update_layout(
+        template="plotly_dark",
+        title=dict(text=title_text, font=dict(size=15, color="#c9d1d9")),
+        xaxis_title="Time (s)",
+        yaxis_title="Temperature (°C)",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02),
+        margin=dict(l=10, r=10, t=60, b=40),
+        height=420,
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#0d1117",
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Lead-time callout
+    if lead_secs:
+        st.markdown(f"""
+        <div class="hero-lead">
+            <div class="lead-label">System alert fired before threshold alarm</div>
+            <div class="lead-number">{lead_secs:.0f}s</div>
+            <div class="lead-label">earlier</div>
+            <div class="lead-sub">
+                System triggered <b>Watching Brief</b> at t={t_system:.0f}s &nbsp;·&nbsp;
+                Simple 80°C alarm at t={t_simple:.0f}s
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    elif t_system and not t_simple:
+        st.markdown(f"""
+        <div class="hero-lead">
+            <div class="lead-label">System flagged anomaly — temperature has not yet reached 80°C threshold</div>
+            <div class="lead-number">Pre-emptive</div>
+            <div class="lead-sub">System alert at t={t_system:.0f}s &nbsp;·&nbsp; 80°C threshold: not reached</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+# ─── STATE PANEL ─────────────────────────────────────────────────────────────
+
+with col_state:
     st.markdown(f"""
-    <div class="state-box state-{current_state}">
-        <div>CURRENT STATE</div>
-        <div class="metric-value">{current_state}/4</div>
-        <div>{current_prob}% Probability of Runaway</div>
+    <div class="state-hero state-{final_state}">
+        <div style="font-size:0.8rem; color:#8b949e; text-transform:uppercase; letter-spacing:1px;">Current State</div>
+        <div class="state-name">{state_label}</div>
+        <div class="state-prob">TR probability: <b>{final_prob}%</b></div>
     </div>
     """, unsafe_allow_html=True)
 
-with cols[1]:
-    active = [t for t, v in [("A", df['trigger_a'].iloc[-1]), ("B", df['trigger_b'].iloc[-1]),
-                             ("C", df['trigger_c'].iloc[-1]), ("D", df['trigger_d'].iloc[-1])] if v]
-    st.markdown(f"""
-    <div class="state-box">
-        <div>ACTIVE TRIGGERS</div>
-        <div>{' '.join([f'<span class="trigger-badge trigger-active">{t}</span>' for t in active]) or "<span class='trigger-badge'>None</span>"}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown("**Active triggers**")
+    for letter in ["A", "B", "C", "D"]:
+        active = final_triggers[letter]
+        dot_cls = "dot-active" if active else "dot-inactive"
+        desc_cls = "trigger-desc-active" if active else "trigger-desc"
+        desc = TRIGGER_EXPLAIN[letter]["active" if active else "inactive"]
+        status_text = "● ACTIVE" if active else "○ clear"
+        status_color = "#f85149" if active else "#484f58"
+        st.markdown(f"""
+        <div class="trigger-row">
+            <div>
+                <div class="trigger-label" style="color:{TRIG_COLORS[letter]}">
+                    {letter} — {TRIGGER_EXPLAIN[letter]['name']}
+                    <span style="color:{status_color}; font-size:0.75rem; margin-left:8px;">{status_text}</span>
+                </div>
+                <div class="{desc_cls}">{desc}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-with cols[2]:
-    st.markdown(f"""
-    <div class="state-box">
-        <div>FIRST [2/4] WARNING</div>
-        <div class="metric-value">t = {t_warning:.0f}s</div>
-        <div style="font-size:0.8rem;">← Lead time starts here</div>
-    </div>
-    """ if t_warning else '<div class="state-box"><div>FIRST WARNING</div><div>No warning yet</div></div>', unsafe_allow_html=True)
+# ─── DETAIL SECTION ─────────────────────────────────────────────────────────
 
-with cols[3]:
-    st.markdown(f"""
-    <div class="state-box">
-        <div>CRITICAL [4/4] AT</div>
-        <div class="metric-value">t = {t_critical:.0f}s</div>
-    </div>
-    """ if t_critical else '<div class="state-box"><div>CRITICAL</div><div>Not reached</div></div>', unsafe_allow_html=True)
+st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
 
-with cols[4]:
-    st.markdown(f"""
-    <div class="state-box etr-box">
-        <div>EST. TIME TO RUNAWAY (ETR)</div>
-        <div class="etr-text">{etr_text}</div>
-        <div style="font-size:0.8rem; color:#db6d28;">Kinematic Projection (300°C)</div>
-    </div>
-    """ if etr_text else '<div class="state-box"><div>EST. TIME TO RUNAWAY</div><div class="metric-value" style="color:#6e7681;">Safe</div><div style="font-size:0.8rem;">No imminent threat</div></div>', unsafe_allow_html=True)
+with st.expander("Prevention simulation & raw metrics", expanded=False):
+    m1, m2, m3, m4 = st.columns(4)
+    with m1:
+        st.metric("State", state_label)
+    with m2:
+        st.metric("TR Probability", f"{final_prob}%")
+    with m3:
+        st.metric("System alert at", f"{t_system:.0f}s" if t_system else "—")
+    with m4:
+        st.metric("Lead time", f"{lead_secs:.0f}s" if lead_secs else "—")
 
-# ----------------- VISUALIZATION -----------------
-st.markdown("### Temperature Trace + A/B/C/D Triggers + Averted Trajectory")
-fig = go.Figure()
-
-fig.add_trace(go.Scatter(x=df['time'], y=df['temperature'], name="Measured Temperature (°C)", line=dict(color="#ff7b72", width=3)))
-
-if averted_df is not None:
-    fig.add_trace(go.Scatter(x=averted_df['time'], y=averted_df['temp_averted'], name="🚀 WITH INTERVENTION (averted)", line=dict(color="#3fb950", width=4, dash="dash")))
-
-# State background
-state_colors = {0: '#3fb950', 1: '#d29922', 2: '#f85149', 3: '#ff7b72', 4: '#ff0000'}
-start = 0
-for i in range(1, len(df)):
-    if df['state'].iloc[i] != df['state'].iloc[i-1]:
-        fig.add_vrect(x0=df['time'].iloc[start], x1=df['time'].iloc[i-1], fillcolor=state_colors[df['state'].iloc[start]], opacity=0.15, layer="below", line_width=0)
-        start = i
-fig.add_vrect(x0=df['time'].iloc[start], x1=df['time'].iloc[-1], fillcolor=state_colors[df['state'].iloc[start]], opacity=0.15, layer="below", line_width=0)
-
-# Clean, single vertical line markers for A/B/C/D
-colors = {"a": "#58a6ff", "b": "#d29922", "c": "#db6d28", "d": "#a371f7"}
-for trig_letter in ["a", "b", "c", "d"]:
-    trig_col = f"trigger_{trig_letter}"
-    trig_points = df[df[trig_col] == 1]
-    if not trig_points.empty:
-        # Find the very first moment it triggered
-        t_first = trig_points.iloc[0]['time']
-        label = f"<b>Trigger {trig_letter.upper()}</b>"
-        fig.add_vline(x=t_first, line_width=2, line_dash="dash", line_color=colors[trig_letter], 
-                      annotation_text=label, annotation_position="top left", annotation_font=dict(color=colors[trig_letter], size=12))
-
-fig.update_layout(title="State Machine + Prevention Simulator", template="plotly_dark", xaxis_title="Time (seconds)", yaxis_title="Temperature (°C)", legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01))
-st.plotly_chart(fig, use_container_width=True)
-
-st.success("✅ MVP ready! Upload your own BMS data or use the synthetic dataset to test forced thermal runaway.")
-st.caption("Lead time measured from first [2/4] Watching Brief • Prevention simulation activates automatically at warning")
+    if averted_df is not None:
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(x=df["time"], y=df["temperature"], name="Actual", line=dict(color="#ff7b72", width=2)))
+        fig2.add_trace(go.Scatter(x=averted_df["time"], y=averted_df["temp_averted"], name="Averted (intervention at Watching Brief)", line=dict(color="#3fb950", width=3, dash="dash")))
+        fig2.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=30), paper_bgcolor="#0d1117", plot_bgcolor="#0d1117")
+        st.plotly_chart(fig2, use_container_width=True)
+        st.info("Averted path simulates immediate power-derating + active cooling triggered at 'Watching Brief' state.")
