@@ -6,158 +6,269 @@ import plotly.graph_objects as go
 import os
 import sys
 
-# Ensure src is in path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from src.hybrid_evaluator import run_hybrid_heuristic
 
 st.set_page_config(page_title="Induced TR Analysis", page_icon="🔥", layout="wide")
 
 st.markdown("""
 <style>
-    .metric-box { background: rgba(33, 38, 45, 0.85); border: 1px solid #30363d; border-radius: 8px; padding: 15px; text-align: center; }
-    .critical-value { color: #ff7b72; font-weight: bold; }
-    .stApp { color: #c9d1d9; }
+    .stApp { background-color: #0d1117; color: #c9d1d9; }
+    .stApp h1, .stApp h2, .stApp h3 { color: #58a6ff !important; }
+    .metric-box { background: rgba(33,38,45,0.85); border:1px solid #30363d; border-radius:8px; padding:15px; text-align:center; }
+    .lead-badge { font-size: 1.6rem; font-weight: 800; color: #3fb950; }
+    .chem-label { font-size: 0.75rem; color: #8b949e; text-transform: uppercase; letter-spacing: 0.8px; }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🔥 Induced Thermal Runaway Anticipation Analysis")
-st.markdown("Automated batch verification across specific 100% SOC (State of Charge) induced runaway datasets to measure the **exact mathematical anticipation lead time** using the A/B/C heuristic.")
+st.title("🔥 Induced Thermal Runaway — Lead Time Analysis")
+st.markdown(
+    "Batch verification across battery abuse datasets. "
+    "Measures the **anticipation lead time**: how many seconds before the 80°C threshold "
+    "does the four-trigger engine first enter Watching Brief state?"
+)
 
-with st.expander("ℹ️ How Does the A-B-C Heuristic Work?"):
+with st.expander("How the four-trigger engine works"):
     st.markdown("""
-    **A. Prophet Expected Range (Mod 1)**: Prevent normal-heat false alarms using a moving baseline limit.
-    **B. CNN-LSTM Surrogate (Mod 2)**: Sustained kinetic heating density ($dT/dt > 0.5$).
-    **C. Kinetic Spike Detection (Mod 3)**: Second derivative exponential blowout ($e^{d^2T/dt^2}$).
-    """)
+| Trigger | Mechanism | Battery physics |
+|---------|-----------|-----------------|
+| **A** | Statistical envelope (expanding ±3σ) | Temperature exits historical bounds |
+| **B** | Rate density (dT/dt sustained > 0.5°C/s) | Persistent acceleration phase |
+| **C** | 2nd derivative spike (d²T/dt² non-linear) | Inflection point before B can activate |
+| **D** | Physics ODE residual (Newton's law) | Excess heat vs model — earliest signal |
 
-datasets = {
-    "Synthetic Baseline (7m Lead-Up)": os.path.join(os.path.dirname(__file__), '..', 'data', 'thermal_runaway_data.csv'),
-    "SNL NMC-LMO 85% SOC (Cell b)": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_NMC-LMO_Graphite_26Ah_85SOC_b.csv",
-    "SNL NMC-LMO 85% SOC (Cell a)": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_NMC-LMO_Graphite_26Ah_85SOC_a.csv",
-    "SNL LMO-LNO 50% SOC (Cell b)": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_LMO-LNO_Graphite_33Ah_50SOC_b-copy.csv",
-    "SNL LCO 90% SOC (Cell a)": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_LCO_Graphite_6.4Ah_90SOC_a.csv"
+Two or more triggers = **Watching Brief** → system alert issued.
+""")
+
+# ─── DATASET REGISTRY ───────────────────────────────────────────────────────
+# Real paths (local dev / Google Drive). Fallback: synthetic samples from repo.
+
+BASE = os.path.dirname(__file__)
+DATA_DIR = os.path.join(BASE, "..", "data")
+SNL_SYNTH = os.path.join(DATA_DIR, "snl_synthetic_samples.csv")
+
+def _synth_for(dataset_id: str) -> pd.DataFrame | None:
+    """Load one chemistry from the bundled synthetic SNL file."""
+    if not os.path.exists(SNL_SYNTH):
+        return None
+    try:
+        df = pd.read_csv(SNL_SYNTH)
+        subset = df[df["dataset"] == dataset_id][["time","temperature","voltage","current"]].copy()
+        return subset if len(subset) > 20 else None
+    except Exception:
+        return None
+
+DATASETS = [
+    {
+        "label": "Synthetic Baseline (7-min lead-up)",
+        "real_path": os.path.join(DATA_DIR, "thermal_runaway_data.csv"),
+        "synth_id": None,
+        "chemistry": "Synthetic",
+    },
+    {
+        "label": "SNL NMC-LMO 85% SOC (Cell a)",
+        "real_path": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_NMC-LMO_Graphite_26Ah_85SOC_a.csv",
+        "synth_id": "SNL_NMC-LMO_85SOC_a",
+        "chemistry": "NMC-LMO",
+    },
+    {
+        "label": "SNL NMC-LMO 85% SOC (Cell b)",
+        "real_path": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_NMC-LMO_Graphite_26Ah_85SOC_b.csv",
+        "synth_id": "SNL_NMC-LMO_85SOC_b",
+        "chemistry": "NMC-LMO",
+    },
+    {
+        "label": "SNL LMO-LNO 50% SOC (Cell b)",
+        "real_path": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_LMO-LNO_Graphite_33Ah_50SOC_b-copy.csv",
+        "synth_id": "SNL_LMO-LNO_50SOC_b",
+        "chemistry": "LMO-LNO",
+    },
+    {
+        "label": "SNL LCO 90% SOC (Cell a)",
+        "real_path": "/Users/edgemarsham/Library/CloudStorage/GoogleDrive-demarcusmuriel600@gmail.com/My Drive/Li_Battery_Project/data/processed/SNL_LCO_Graphite_6.4Ah_90SOC_a.csv",
+        "synth_id": "SNL_LCO_90SOC_a",
+        "chemistry": "LCO",
+    },
+]
+
+COL_MAP = {
+    "temp": "temperature", "t_c": "temperature", "t": "temperature",
+    "timestamp": "time", "test_time (s)": "time", "temp_surface_1": "temperature",
 }
 
+def load_dataset(ds: dict) -> tuple[pd.DataFrame | None, str]:
+    """Returns (df, source_label). Falls back to synthetic if real path unavailable."""
+    # Try real path
+    if os.path.exists(ds["real_path"]):
+        try:
+            df = pd.read_csv(ds["real_path"], comment="#")
+            df.columns = df.columns.str.lower()
+            for old, new in COL_MAP.items():
+                if old in df.columns and new not in df.columns:
+                    df.rename(columns={old: new}, inplace=True)
+            if "time" not in df.columns:
+                df["time"] = np.arange(len(df))
+            if "temperature" not in df.columns:
+                nums = df.select_dtypes(include=[np.number]).columns.tolist()
+                df["temperature"] = df[nums[-1]] if nums else 0.0
+            df = df.apply(pd.to_numeric, errors="coerce").dropna(subset=["time", "temperature"])
+            return df, "real"
+        except Exception:
+            pass
+
+    # Fallback: synthetic
+    if ds["synth_id"]:
+        df = _synth_for(ds["synth_id"])
+        if df is not None:
+            return df, "synthetic"
+
+    # Last resort: bundled baseline
+    baseline = os.path.join(DATA_DIR, "thermal_runaway_data.csv")
+    if os.path.exists(baseline):
+        try:
+            df = pd.read_csv(baseline)
+            df = df.apply(pd.to_numeric, errors="coerce").dropna()
+            return df, "baseline_fallback"
+        except Exception:
+            pass
+
+    return None, "unavailable"
+
+# ─── BATCH ANALYSIS ─────────────────────────────────────────────────────────
+
+RUNAWAY_TEMP = 80.0
 results = []
-figs = []
+charts = []
 downloads = []
 
-with st.spinner("Processing 5 Induced TR Simulation Datasets..."):
-    for name, path in datasets.items():
+with st.spinner("Running four-trigger engine across all datasets …"):
+    for ds in DATASETS:
+        df_raw, source = load_dataset(ds)
+        label = ds["label"]
+        chem  = ds["chemistry"]
+
+        if df_raw is None:
+            results.append({"Dataset": label, "Chemistry": chem, "Source": "unavailable",
+                             "T_max (°C)": "—", "System alert (s)": "—", "80°C alarm (s)": "—",
+                             "Lead time (s)": "—", "Trig A": "—", "Trig B": "—", "Trig C": "—", "Trig D": "—"})
+            continue
+
         try:
-            if not os.path.exists(path):
-                results.append({"Dataset": name, "Temp Range (C)": "N/A", "Runaway Extent (T_max)": "N/A", "Earliest Warning [3/3 Triggers]": "N/A", "Anticipation Lead Time": "N/A"})
-                continue
-                
-            df_raw = pd.read_csv(path, comment='#')
-            df_raw.columns = df_raw.columns.str.lower()
-            
-            # Map columns
-            col_map = {'temp': 'temperature', 't_c': 'temperature', 't': 'temperature', 'timestamp': 'time', 'test_time (s)': 'time'}
-            for old, new in col_map.items():
-                if old in df_raw.columns and new not in df_raw.columns:
-                    df_raw.rename(columns={old: new}, inplace=True)
-            
-            if 'time' not in df_raw.columns:
-                df_raw['time'] = np.arange(len(df_raw))
-            if 'temperature' not in df_raw.columns:
-                num_c = df_raw.select_dtypes(include=[np.number]).columns.tolist()
-                df_raw['temperature'] = df_raw[num_c[-1]] if num_c else np.zeros(len(df_raw))
-                
-            df_raw = df_raw.dropna(subset=['time', 'temperature'])
-            
-            # Apply Hybrid Evaluator
-            df_computed = run_hybrid_heuristic(df_raw, target_col='temperature', k_spike=5.0)
-            
-            T_max = df_computed['temperature'].max()
-            T_min = df_computed['temperature'].min()
-            
-            # Failure is exactly T_max (sensor dropout / explosion)
-            t_failure = df_computed.loc[df_computed['temperature'] == T_max, 'time'].iloc[0]
-            
-            # Warning is the earliest moment ANY state trigger activates (>20%)
-            warning_points = df_computed[df_computed['prob_tr'] > 20.0]
-            t_warning = warning_points.iloc[0]['time'] if not warning_points.empty else None
-            
-            max_prob = warning_points['prob_tr'].max() if not warning_points.empty else 0
-            if max_prob > 90: max_state_str = "4/4"
-            elif max_prob > 70: max_state_str = "3/4"
-            elif max_prob > 45: max_state_str = "2/4"
-            else: max_state_str = "1/4"
-            
-            lead_time = (t_failure - t_warning) if t_warning is not None else None
-            
+            df_c = run_hybrid_heuristic(df_raw, target_col="temperature")
+
+            T_max   = df_c["temperature"].max()
+            t_alarm = df_c.loc[df_c["temperature"] >= RUNAWAY_TEMP, "time"]
+            t_alarm = float(t_alarm.iloc[0]) if not t_alarm.empty else None
+
+            # System alert = first time 2+ triggers fire (Watching Brief)
+            watching = df_c[df_c["trigger_sum"] >= 2]
+            t_system = float(watching.iloc[0]["time"]) if not watching.empty else None
+
+            lead = (t_alarm - t_system) if (t_alarm and t_system and t_system < t_alarm) else None
+
             trig_times = {}
-            for t_let in ["A", "B", "C", "D"]:
-                tp = df_computed[df_computed[f"trigger_{t_let}"] == 1]
-                trig_times[t_let] = f"{tp.iloc[0]['time']:.1f}s" if not tp.empty else "-"
-            
+            for letter in ["A", "B", "C", "D"]:
+                col = f"trigger_{letter}"
+                tp = df_c[df_c[col] == 1]
+                trig_times[letter] = f"{tp.iloc[0]['time']:.0f}s" if not tp.empty else "—"
+
+            source_label = {"real": "✓ real", "synthetic": "⚗ synthetic", "baseline_fallback": "⚗ fallback"}.get(source, source)
             results.append({
-                "Dataset": name,
-                "Runaway Extent (T_max)": f"T={t_failure:.1f}s",
-                "Earliest System Warning": f"T={t_warning:.1f}s (Max {max_state_str})" if t_warning else "No Warning",
-                "Anticipation Lead Time": f"🔥 {lead_time:.1f}s" if lead_time is not None and lead_time > 0 else ("Lag/Reactive" if lead_time is not None else "N/A"),
+                "Dataset": label,
+                "Chemistry": chem,
+                "Source": source_label,
+                "T_max (°C)": f"{T_max:.0f}",
+                "System alert (s)": f"{t_system:.0f}" if t_system else "—",
+                "80°C alarm (s)":   f"{t_alarm:.0f}"  if t_alarm  else "—",
+                "Lead time (s)":    f"🔥 {lead:.0f}"   if lead     else ("reactive" if t_alarm else "—"),
                 "Trig A": trig_times["A"],
                 "Trig B": trig_times["B"],
                 "Trig C": trig_times["C"],
-                "Trig D": trig_times["D"]
+                "Trig D": trig_times["D"],
             })
-            
-            downloads.append({"name": name, "data": df_computed.to_csv(index=False).encode('utf-8')})
-            
-            # Subplot - Remove ALL data after the blast/failure mark
-            idx_limit = t_failure if t_failure else df_computed['time'].max()
-            df_plot = df_computed[df_computed['time'] <= idx_limit]
-            
+
+            downloads.append({"label": label[:12], "csv": df_c.to_csv(index=False).encode()})
+
+            # Per-dataset chart
+            COLORS = {"A": "#58a6ff", "B": "#d29922", "C": "#db6d28", "D": "#3fb950"}
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot['temperature'], name="Temp (°C)", line=dict(color="#ff7b72", width=3)))
-            fig.add_trace(go.Scatter(x=df_plot['time'], y=df_plot['prob_tr'], name="State Severity %", line=dict(color="#a371f7", width=2, dash='dot'), yaxis="y2"))
-            
-            # Annotate individual triggers AND calculate Time to Runaway
-            colors = {"A": "#58a6ff", "B": "#d29922", "C": "#db6d28", "D": "#3fb950"}
-            for trig_letter in ["A", "B", "C", "D"]:
-                trig_col = f"trigger_{trig_letter}"
-                trig_points = df_plot[df_plot[trig_col] == 1]
-                if not trig_points.empty:
-                    t_first = trig_points.iloc[0]['time']
-                    t_to_runaway = (t_failure - t_first) if t_failure else 0
-                    
-                    # Create a visually rich annotation label
-                    label = f"<b>{trig_letter}</b><br>{t_to_runaway:.1f}s warning" if t_to_runaway > 0 else f"<b>{trig_letter}</b>"
-                    fig.add_vline(x=t_first, line_width=1.5, line_dash="dash", line_color=colors[trig_letter], 
-                                  annotation_text=label, annotation_position="top left", annotation_font=dict(color=colors[trig_letter], size=10))
-            
-            if t_failure:
-                fig.add_vline(x=t_failure, line_width=2, line_dash="solid", line_color="#ff7b72", annotation_text="💥 Runaway", annotation_font=dict(size=14, color="#ff7b72"))
-                
+            fig.add_trace(go.Scatter(x=df_c["time"], y=df_c["temperature"],
+                                     name="Temp (°C)", line=dict(color="#ff7b72", width=2.5)))
+            fig.add_trace(go.Scatter(x=df_c["time"], y=df_c["prob_tr"],
+                                     name="State severity (%)", line=dict(color="#a371f7", width=1.5, dash="dot"),
+                                     yaxis="y2"))
+            for letter in ["A", "B", "C", "D"]:
+                tp = df_c[df_c[f"trigger_{letter}"] == 1]
+                if not tp.empty:
+                    t0 = float(tp.iloc[0]["time"])
+                    lead_str = f"{t_alarm - t0:.0f}s warning" if t_alarm and t0 < t_alarm else ""
+                    fig.add_vline(x=t0, line_width=1.5, line_dash="dash", line_color=COLORS[letter],
+                                  annotation_text=f"<b>{letter}</b> {lead_str}",
+                                  annotation_font=dict(color=COLORS[letter], size=10),
+                                  annotation_position="top left")
+            if t_alarm:
+                fig.add_vline(x=t_alarm, line_width=2, line_color="#ff7b72",
+                              annotation_text="80°C alarm", annotation_font=dict(color="#ff7b72", size=11))
+            if t_system and t_alarm and t_system < t_alarm:
+                fig.add_vline(x=t_system, line_width=2, line_dash="dash", line_color="#3fb950",
+                              annotation_text=f"System alert ({lead:.0f}s early)",
+                              annotation_font=dict(color="#3fb950", size=11),
+                              annotation_position="top right")
+
+            title = f"{label} [{chem}]"
+            if lead:
+                title += f" — <b>{lead:.0f}s lead time</b>"
             fig.update_layout(
-                title=f"Anticipation Window: {name}",
+                template="plotly_dark", title=title, height=380,
                 yaxis=dict(title="Temp (°C)"),
-                yaxis2=dict(title="State Triggers (%)", overlaying="y", side="right", range=[0, 105]),
-                margin=dict(l=20, r=20, t=40, b=20),
-                height=400,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                yaxis2=dict(title="State %", overlaying="y", side="right", range=[0, 105]),
+                margin=dict(l=10, r=10, t=50, b=30),
+                paper_bgcolor="#0d1117", plot_bgcolor="#0d1117",
             )
-            figs.append(fig)
-            
-        except Exception as dummy_e:
+            charts.append(fig)
+
+        except Exception as e:
             import traceback
-            err_details = traceback.format_exc()
-            print(f"Error on {name}:\n{err_details}")
-            results.append({"Dataset": name, "Runaway Extent (T_max)": f"Error: {dummy_e}", "Earliest System Warning": "N/A", "Anticipation Lead Time": "N/A", "Trig A": "-", "Trig B": "-", "Trig C": "-", "Trig D": "-"})
+            print(traceback.format_exc())
+            results.append({"Dataset": label, "Chemistry": chem, "Source": source,
+                             "T_max (°C)": f"Error: {e}", "System alert (s)": "—",
+                             "80°C alarm (s)": "—", "Lead time (s)": "—",
+                             "Trig A": "—", "Trig B": "—", "Trig C": "—", "Trig D": "—"})
 
-st.markdown("### Aggregated Lead Time Verification")
-st.table(pd.DataFrame(results))
+# ─── HEADLINE SUMMARY ───────────────────────────────────────────────────────
 
-# Show quick download links safely
-if len(downloads) > 0:
-    st.markdown("**Download Analyzed Datasets:**")
-    cols = st.columns(len(downloads))
-    for idx, dl in enumerate(downloads):
-        with cols[idx]:
-            st.download_button(label=f"📥 {dl['name'][:10]}...", data=dl['data'], file_name=f"annotated_{dl['name'].replace(' ', '_')}.csv", mime="text/csv", key=f"dl_{idx}")
+st.markdown("### Lead-time summary")
 
-st.write("---")
-st.markdown("### Sequential Runaway Charts")
-for plot in figs:
-    st.plotly_chart(plot, use_container_width=True)
+valid = [r for r in results if r["Lead time (s)"] not in ("—", "reactive") and "🔥" in str(r["Lead time (s)"])]
+if valid:
+    leads = [float(r["Lead time (s)"].replace("🔥 ", "")) for r in valid]
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.markdown(f'<div class="metric-box"><div class="chem-label">Mean lead time</div><div class="lead-badge">{np.mean(leads):.0f}s</div></div>', unsafe_allow_html=True)
+    with c2:
+        st.markdown(f'<div class="metric-box"><div class="chem-label">Max lead time</div><div class="lead-badge">{max(leads):.0f}s</div></div>', unsafe_allow_html=True)
+    with c3:
+        st.markdown(f'<div class="metric-box"><div class="chem-label">Datasets detected</div><div class="lead-badge">{len(valid)} / {len(results)}</div></div>', unsafe_allow_html=True)
+
+st.markdown("### Per-dataset results")
+st.dataframe(pd.DataFrame(results), use_container_width=True)
+
+if downloads:
+    st.markdown("**Download analysed datasets:**")
+    cols = st.columns(min(len(downloads), 5))
+    for i, dl in enumerate(downloads):
+        with cols[i % 5]:
+            st.download_button(f"📥 {dl['label']}", data=dl["csv"],
+                               file_name=f"analyzed_{dl['label'].replace(' ','_')}.csv",
+                               mime="text/csv", key=f"dl_{i}")
+
+st.markdown("---")
+st.markdown("### Detection charts")
+for fig in charts:
+    st.plotly_chart(fig, use_container_width=True)
+
+st.caption(
+    "⚗ Datasets marked *synthetic* use physics-realistic traces generated from SNL chemistry profiles "
+    "when the original files are not available in the deployment environment. "
+    "Real SNL data will be used automatically when present."
+)
