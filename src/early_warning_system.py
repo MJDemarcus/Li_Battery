@@ -1,87 +1,94 @@
+"""
+Multi-model early warning system — wires RF spike detector and CNN-LSTM
+trend analyser into a single comparative diagnostic report.
+
+Imports are relative (within the src package) to avoid path issues.
+"""
 import os
-# Disable GPU/Metal for fast CPU training of tiny model
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
-import pandas as pd
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from src.data_preprocessor import preprocess_data
-from src.spike_detector_rf import train_spike_detector
-from src.trend_analyzer_lstm import build_cnn_lstm
-import tensorflow as tf
 
-# Force CPU only
-tf.config.set_visible_devices([], 'GPU')
+from .data_preprocessor import preprocess_data
+from .spike_detector_rf import train_spike_detector, FEATURE_COLS
+from .trend_analyzer_lstm import build_cnn_lstm
 
-def run_early_warning_system():
-    print("Initializing Multi-Model Early Warning System...")
-    
-    # 1. Train/Get RF Model
-    rf = train_spike_detector()
-    
-    # 2. Get Data for LSTM
+
+def run_early_warning_system(input_path: str = "data/thermal_runaway_data.csv"):
+    print("Initialising Multi-Model Early Warning System …")
+
+    # ── RF detector ───────────────────────────────────────────────────────
+    rf, rf_features = train_spike_detector(input_path)
+    if rf is None:
+        print("RF training failed — aborting.")
+        return
+
+    # ── Sequence data for CNN-LSTM ────────────────────────────────────────
     window_size = 10
-    df, X, y = preprocess_data(window_size=window_size)
-    
-    # 3. Build and Train LSTM
+    df, X, y = preprocess_data(input_path, window_size=window_size)
+    if X is None:
+        print("Data load failed — aborting.")
+        return
+
+    # ── CNN-LSTM ─────────────────────────────────────────────────────────
+    import tensorflow as tf
+    tf.config.set_visible_devices([], "GPU")
+
     input_shape = (X.shape[1], X.shape[2])
-    print("Initializing Integrated CNN-LSTM...")
-    lstm_model = build_cnn_lstm(input_shape)
-    print("Training Integrated CNN-LSTM (1 epoch, CPU only)...")
-    lstm_model.fit(X, y, epochs=1, batch_size=4, verbose=0)
-    
-    # 4. Comparative Inference
-    features = ['voltage', 'current', 'temperature', 'dT_dt', 'dV_dt']
-    rf_preds = rf.predict(df[features])
-    
-    lstm_preds_raw = lstm_model.predict(X)
-    lstm_preds = (lstm_preds_raw > 0.5).astype(int).flatten()
-    
-    # 5. Visualization
-    plt.figure(figsize=(12, 7))
-    plt.plot(df['time'], df['temperature'], label='Temperature (C)', color='gray', alpha=0.5)
-    
-    # Highlight RF Detections
-    rf_times = df['time'][rf_preds == 1]
-    rf_temps = df['temperature'][rf_preds == 1]
-    plt.scatter(rf_times, rf_temps, color='red', marker='x', label='RF Spike Detection')
-    
-    # Highlight LSTM Detections
-    lstm_times = df['time'].iloc[window_size:][lstm_preds == 1]
-    lstm_temps = df['temperature'].iloc[window_size:][lstm_preds == 1]
-    plt.scatter(lstm_times, lstm_temps, color='orange', marker='o', facecolors='none', 
-                s=100, label='LSTM Trend Warning')
-    
-    plt.axhline(80, color='red', linestyle='--', alpha=0.3, label='Runaway Threshold')
-    plt.title('Integrated Early Warning System: Detection Comparison')
-    plt.xlabel('Time (s)')
-    plt.ylabel('Temperature (C)')
-    plt.legend()
-    
-    final_plot = 'early_warning_detection.png'
-    plt.savefig(final_plot)
-    print(f"Final detection comparison saved to {final_plot}")
-    
-    # 6. Report
-    onset_idx = df[df['label'] == 1].index[0]
-    onset_time = df['time'].iloc[onset_idx]
-    first_rf_time = rf_times.iloc[0] if not rf_times.empty else None
-    first_lstm_time = lstm_times.iloc[0] if not lstm_times.empty else None
-    
-    print(f"\n" + "="*45)
-    print(f"--- THERMAL RUNAWAY DIAGNOSTIC REPORT ---")
-    print(f"="*45)
-    print(f"Critical Runaway Onset (Phase 2):   {onset_time:.2f}s\n")
-    
-    if first_rf_time: 
-        rf_lead_time = onset_time - first_rf_time
-        print(f"[RF Detector] Warning Triggered at: {first_rf_time:.2f}s")
-        print(f"              => Lead Time:         {rf_lead_time:.2f}s before failure\n")
-        
-    if first_lstm_time: 
-        lstm_lead_time = onset_time - first_lstm_time
-        print(f"[CNN-LSTM]    Warning Triggered at: {first_lstm_time:.2f}s")
-        print(f"              => Lead Time:         {lstm_lead_time:.2f}s before failure")
-    print(f"="*45 + "\n")
+    lstm = build_cnn_lstm(input_shape)
+    lstm.fit(X, y, epochs=20, batch_size=8, verbose=0)
+
+    # ── Inference ────────────────────────────────────────────────────────
+    rf_features_present = [c for c in FEATURE_COLS if c in df.columns]
+    rf_preds = rf.predict(df[rf_features_present].fillna(0.0))
+
+    lstm_proba = lstm.predict(X, verbose=0).flatten()
+    lstm_preds = (lstm_proba > 0.5).astype(int)
+
+    # ── Visualise ────────────────────────────────────────────────────────
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 10), sharex=False)
+
+    ax1.plot(df["time"], df["temperature"], color="steelblue", label="Temperature (°C)", alpha=0.6)
+    rf_alert = df["time"][rf_preds == 1]
+    rf_temp = df["temperature"][rf_preds == 1]
+    ax1.scatter(rf_alert, rf_temp, color="red", marker="x", s=60, label="RF alert")
+    ax1.axhline(80, color="red", linestyle="--", alpha=0.3, label="80°C threshold")
+    ax1.set_title("RF Spike Detector")
+    ax1.legend()
+
+    lstm_times = df["time"].values[window_size:]
+    ax2.plot(lstm_times, lstm_proba, color="orange", label="CNN-LSTM P(runaway)")
+    ax2.axhline(0.5, color="red", linestyle="--", alpha=0.4, label="Decision boundary")
+    ax2.set_title("CNN-LSTM Trend Analyser")
+    ax2.set_xlabel("Time (s)")
+    ax2.legend()
+
+    plt.tight_layout()
+    plt.savefig("early_warning_detection.png")
+    print("Detection plot saved to early_warning_detection.png")
+
+    # ── Diagnostic report ────────────────────────────────────────────────
+    runaway_time = df.loc[df["temperature"] >= 80, "time"]
+    onset = runaway_time.iloc[0] if not runaway_time.empty else None
+
+    rf_first = df["time"][rf_preds == 1].iloc[0] if (rf_preds == 1).any() else None
+    lstm_first_idx = np.where(lstm_preds == 1)[0]
+    lstm_first = lstm_times[lstm_first_idx[0]] if len(lstm_first_idx) > 0 else None
+
+    print("\n" + "=" * 50)
+    print("  THERMAL RUNAWAY DIAGNOSTIC REPORT")
+    print("=" * 50)
+    if onset:
+        print(f"  Runaway onset (T≥80°C):       {onset:.1f}s")
+    if rf_first and onset:
+        print(f"  RF detector first alert:      {rf_first:.1f}s  ({onset - rf_first:.1f}s lead)")
+    if lstm_first and onset:
+        print(f"  CNN-LSTM first alert:         {lstm_first:.1f}s  ({onset - lstm_first:.1f}s lead)")
+    print("=" * 50)
+
 
 if __name__ == "__main__":
     run_early_warning_system()
