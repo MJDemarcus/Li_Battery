@@ -1,64 +1,45 @@
+"""Shared utilities for the Li_Battery package."""
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import MinMaxScaler
 
-def create_sequences(data, seq_length):
-    """
-    Creates sequences for LSTM model.
-    
-    Args:
-        data: Numpy array of data.
-        seq_length: Length of sequences.
-        
-    Returns:
-        np.array: X sequences.
-        np.array: y targets.
-    """
-    # Vectorized implementation for speed
-    xs = []
-    ys = []
-    
-    # Ensure data is numpy array
-    data = np.array(data)
-    
-    # Use simple loop if data is small, but for larger data this is effectively efficient enough
-    # compared to the LSTM training time. 
-    # For a true vectorized approach we would use stride_tricks, but that can be complex to safeguard.
-    # Let's stick to a list comprehension which is faster than append loop
-    xs = [data[i:(i + seq_length)] for i in range(len(data) - seq_length)]
-    ys = [data[i + seq_length] for i in range(len(data) - seq_length)]
-    
-    return np.array(xs), np.array(ys)
 
-def preprocess_data(df, target_col, seq_length=50, split_ratio=0.8):
+def compute_lead_time_distribution(eval_df: pd.DataFrame, trigger_col: str = "trigger_D") -> dict:
     """
-    Preprocesses data for LSTM model: scaling and sequence creation.
-    
-    Args:
-        df: Pandas DataFrame.
-        target_col: Name of the target column.
-        seq_length: Length of input sequences.
-        split_ratio: Train/test split ratio.
-        
-    Returns:
-        dict: Contains X_train, y_train, X_test, y_test, scaler.
+    From evaluate_on_dataset output, compute lead-time stats for a given trigger.
+    Returns dict with mean, median, min, max (seconds before runaway).
     """
-    data = df[[target_col]].values
-    
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    data_scaled = scaler.fit_transform(data)
-    
-    X, y = create_sequences(data_scaled, seq_length)
-    
-    train_size = int(len(X) * split_ratio)
-    
-    X_train, X_test = X[:train_size], X[train_size:]
-    y_train, y_test = y[:train_size], y[train_size:]
-    
+    fired = eval_df[eval_df[trigger_col] & eval_df["seconds_to_runaway"].notna()]
+    if fired.empty:
+        return {"mean": None, "median": None, "min": None, "max": None}
+    leads = fired["seconds_to_runaway"].values
     return {
-        'X_train': X_train,
-        'y_train': y_train,
-        'X_test': X_test,
-        'y_test': y_test,
-        'scaler': scaler
+        "mean": round(float(np.mean(leads)), 1),
+        "median": round(float(np.median(leads)), 1),
+        "min": round(float(np.min(leads)), 1),
+        "max": round(float(np.max(leads)), 1),
+    }
+
+
+def precision_recall_at_threshold(eval_df: pd.DataFrame, state_threshold: int = 2) -> dict:
+    """
+    Treat state_code >= state_threshold as positive prediction.
+    Compare against whether seconds_to_runaway is finite (actual runaway series).
+    """
+    eval_df = eval_df.copy()
+    eval_df["pred_pos"] = eval_df["state_code"] >= state_threshold
+    eval_df["actual_pos"] = eval_df["seconds_to_runaway"].notna()
+
+    tp = (eval_df["pred_pos"] & eval_df["actual_pos"]).sum()
+    fp = (eval_df["pred_pos"] & ~eval_df["actual_pos"]).sum()
+    fn = (~eval_df["pred_pos"] & eval_df["actual_pos"]).sum()
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    return {
+        "precision": round(precision, 3),
+        "recall": round(recall, 3),
+        "f1": round(f1, 3),
+        "tp": int(tp), "fp": int(fp), "fn": int(fn),
     }
