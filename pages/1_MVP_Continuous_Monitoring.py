@@ -40,6 +40,8 @@ def evaluate_trigger_a(df):
 def evaluate_trigger_b(df, heating_threshold=0.5, density_threshold=0.5, window=10):
     """Trigger B: Heating Density"""
     dt = df['time'].diff().fillna(1.0)
+    # Prevent division by zero
+    dt[dt == 0] = 1.0
     dT = df['temp_smooth'].diff().fillna(0.0)
     rate = dT / dt
     steep = (rate > heating_threshold).astype(int)
@@ -49,6 +51,8 @@ def evaluate_trigger_b(df, heating_threshold=0.5, density_threshold=0.5, window=
 def evaluate_trigger_c(df, threshold=100):
     """Trigger C: Acceleration Spike (2nd Derivative)"""
     dt = df['time'].diff().fillna(1.0)
+    # Prevent division by zero
+    dt[dt == 0] = 1.0
     dT = df['temp_smooth'].diff().fillna(0.0)
     d2T = dT.diff().fillna(0.0) / dt
     spike_signal = np.maximum(0, d2T * 100) ** 2
@@ -61,12 +65,21 @@ def evaluate_trigger_d(df, early_fraction=0.25, dev_sigma=3.0):
     early = df.iloc[:n_early]
     
     dt = early['time'].diff().fillna(1.0)
+    # Prevent division by zero
+    dt[dt == 0] = 1.0
     dT = early['temp_smooth'].diff().fillna(0.0)
     rate = dT / dt
     X = early['temperature'].values - T_amb
     
-    coeffs = np.polyfit(X, rate.values, 1) # rate = α - βX
-    beta, alpha = -coeffs[0], coeffs[1]
+    try:
+        valid_mask = np.isfinite(X) & np.isfinite(rate.values)
+        if valid_mask.sum() > 1:
+            coeffs = np.polyfit(X[valid_mask], rate.values[valid_mask], 1) # rate = α - βX
+            beta, alpha = -coeffs[0], coeffs[1]
+        else:
+            alpha, beta = 0.0, 0.0
+    except Exception:
+        alpha, beta = 0.0, 0.0
     
     # Full trace evaluation
     X_full = df['temperature'].values - T_amb
@@ -114,6 +127,7 @@ data_source = st.radio("Choose Data Source", ["Preloaded Datasets", "Upload CSV 
 
 if data_source == "Preloaded Datasets":
     datasets = {
+        "Liguard Live Demo Dataset (BMS Logs)": "data/bms_simulations/Liguard_Live_Demo_Dataset.csv",
         "Synthetic Baseline (7m Lead-Up)": "data/thermal_runaway_data.csv",
         "Battery Archive - Normal Cycling": "data/external/battery_archive_cycling.csv",
         "NASA - Baseline Aging Sample": "data/external/nasa_aging_sample.csv",
@@ -129,20 +143,8 @@ if data_source == "Preloaded Datasets":
         path = os.path.join(os.path.dirname(__file__), '..', path)
         
     try:
-        df_raw = pd.read_csv(path, comment='#')
-        df_raw.columns = df_raw.columns.str.lower()
-        col_map = {'temp': 'temperature', 't_c': 'temperature', 't': 'temperature', 'timestamp': 'time', 'test_time (s)': 'time', 'temperature_measured': 'temperature', 'cycle': 'time'}
-        for old_col, new_col in col_map.items():
-            if old_col in df_raw.columns and new_col not in df_raw.columns:
-                df_raw.rename(columns={old_col: new_col}, inplace=True)
-                
-        if 'time' not in df_raw.columns: 
-            df_raw['time'] = np.arange(len(df_raw))
-        if 'temperature' not in df_raw.columns:
-            num_c = df_raw.select_dtypes(include=[np.number]).columns.tolist()
-            df_raw['temperature'] = df_raw[num_c[-1]] if num_c else np.zeros(len(df_raw))
-            
-        df = apply_smoothing(df_raw)
+        comment_char = None if "Liguard_Live_Demo_Dataset" in path else "#"
+        df_raw = pd.read_csv(path, comment=comment_char)
     except Exception as e:
         st.error(f"Failed to load preloaded set: {e}")
         st.stop()
@@ -151,16 +153,57 @@ else:
     uploaded_file = st.file_uploader("Upload a BMS CSV dataset (must contain 'time' and 'temperature')", type=['csv'])
     if uploaded_file is not None:
         df_raw = pd.read_csv(uploaded_file)
-        df_raw.columns = df_raw.columns.str.lower()
-        if 'time' not in df_raw.columns or 'temperature' not in df_raw.columns:
-            st.error("Invalid Dataset: Ensure 'time' and 'temperature' columns exist.")
-            st.stop()
-        df = apply_smoothing(df_raw)
     else:
         st.info("Waiting for file upload... Using Demo Engine in background.")
         t = np.arange(0, 600, 1)
         temp = 25 + 0.02*t + 5 * np.exp((t-450)/40) * (t > 450) + np.random.normal(0, 0.3, len(t))
-        df = apply_smoothing(pd.DataFrame({'time': t, 'temperature': temp}))
+        df_raw = pd.DataFrame({'time': t, 'temperature': temp})
+
+# Time column parsing, sorting, and duplicate collapsing
+time_candidates = [c for c in df_raw.columns if c.lower() in ['_time', 'time', 'timestamp', 'test_time (s)']]
+if time_candidates:
+    time_col = time_candidates[0]
+    df_raw['_time_parsed'] = pd.to_datetime(df_raw[time_col], format='mixed', errors='coerce')
+    df_raw = df_raw.dropna(subset=['_time_parsed'])
+    df_raw = df_raw.sort_values('_time_parsed').reset_index(drop=True)
+    
+    numeric_cols = df_raw.select_dtypes(include=[np.number]).columns
+    non_numeric_cols = df_raw.select_dtypes(exclude=[np.number]).columns.difference(['_time_parsed'])
+    agg_dict = {col: 'mean' for col in numeric_cols}
+    for col in non_numeric_cols:
+        agg_dict[col] = 'first'
+    df_raw = df_raw.groupby('_time_parsed', as_index=False).agg(agg_dict)
+    df_raw['time'] = (df_raw['_time_parsed'] - df_raw['_time_parsed'].iloc[0]).dt.total_seconds()
+else:
+    df_raw.columns = df_raw.columns.str.lower()
+    col_map = {'temp': 'temperature', 't_c': 'temperature', 'timestamp': 'time', 'test_time (s)': 'time'}
+    for old, new in col_map.items():
+        if old in df_raw.columns and new not in df_raw.columns:
+            df_raw.rename(columns={old: new}, inplace=True)
+    if 'time' not in df_raw.columns:
+        df_raw['time'] = np.arange(len(df_raw))
+
+# Temperature channel detection and selection
+temp_cols = [c for c in df_raw.columns if 'temp' in c.lower() or c.lower() in ['t_c', 't', 'temperature_measured']]
+if temp_cols:
+    if len(temp_cols) > 1:
+        selected_temp_col = st.sidebar.selectbox("Select Temperature Channel", temp_cols, key="mc_temp_select")
+    else:
+        selected_temp_col = temp_cols[0]
+else:
+    numeric = df_raw.select_dtypes(include=[np.number]).columns
+    selected_temp_col = numeric[-1] if len(numeric) > 0 else 'temperature'
+    if selected_temp_col not in df_raw.columns:
+        df_raw[selected_temp_col] = 0.0
+
+# Set 'temperature' column to the cleaned chosen column
+df_raw['temperature'] = df_raw[selected_temp_col]
+
+# Clean chosen temperature: replace 0.0 and NaN with NaN, then ffill/bfill to remove dropouts
+df_raw['temperature'] = df_raw['temperature'].replace(0.0, np.nan)
+df_raw['temperature'] = df_raw['temperature'].ffill().bfill()
+
+df = apply_smoothing(df_raw)
 
 # Run Triggers & Force Stickiness (Once TR starts, it doesn't un-start)
 trig_a = evaluate_trigger_a(df).cummax()
@@ -216,5 +259,27 @@ if averted_df is not None:
 fig.update_layout(template="plotly_dark", title="Detection vs. Prevention Trajectory", xaxis_title="Time (s)", yaxis_title="Temp (°C)")
 st.plotly_chart(fig, use_container_width=True)
 
-st.info("**Groundbreaking Feature:** The green dashed line simulates immediate power-derating and active cooling at the 'Watching Brief' stage.")
+# Secondary visualization: Electrical Load Profile (if columns are present)
+voltage_col = next((c for c in df.columns if 'average_line_to_line_volts' in c.lower() or 'line_to_line_volts' in c.lower()), None)
+current_col = next((c for c in df.columns if 'average_line_current' in c.lower() or 'line_current' in c.lower()), None)
 
+if voltage_col or current_col:
+    st.markdown("### Synchronized Electrical Load Profile")
+    fig_elec = go.Figure()
+    
+    if voltage_col:
+        fig_elec.add_trace(go.Scatter(x=df['time'], y=df[voltage_col], name="Voltage (V)", line=dict(color="#58a6ff", width=2)))
+    if current_col:
+        fig_elec.add_trace(go.Scatter(x=df['time'], y=df[current_col], name="Current (A)", line=dict(color="#d29922", width=2), yaxis="y2"))
+        
+    fig_elec.update_layout(
+        title="BMS Electrical Monitoring",
+        template="plotly_dark",
+        xaxis_title="Time (seconds)",
+        yaxis=dict(title=dict(text="Voltage (V)", font=dict(color="#58a6ff")), tickfont=dict(color="#58a6ff")),
+        yaxis2=dict(title=dict(text="Current (A)", font=dict(color="#d29922")), tickfont=dict(color="#d29922"), overlaying="y", side="right"),
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01)
+    )
+    st.plotly_chart(fig_elec, use_container_width=True)
+
+st.info("**Groundbreaking Feature:** The green dashed line simulates immediate power-derating and active cooling at the 'Watching Brief' stage.")

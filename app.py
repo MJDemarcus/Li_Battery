@@ -102,9 +102,16 @@ def evaluate_trigger_d(df, frac=0.25, sigma=2.5, T_amb=None):
     early = df.iloc[:n]
     X = early["temperature"].values - T_amb
     rate = early["dT_dt"].fillna(0.0).values
-    if len(X) > 1:
-        coeffs = np.polyfit(X, rate, 1)
-        beta, alpha = -coeffs[0], coeffs[1]
+    if len(X) > 1 and len(rate) > 1:
+        try:
+            valid_mask = np.isfinite(X) & np.isfinite(rate)
+            if valid_mask.sum() > 1:
+                coeffs = np.polyfit(X[valid_mask], rate[valid_mask], 1)
+                beta, alpha = -coeffs[0], coeffs[1]
+            else:
+                alpha, beta = 0.0, 0.0
+        except Exception:
+            alpha, beta = 0.0, 0.0
     else:
         alpha, beta = 0.0, 0.0
     Xf = df["temperature"].values - T_amb
@@ -162,6 +169,7 @@ TRIGGER_EXPLAIN = {
 # ─── DATA LOADING ────────────────────────────────────────────────────────────
 
 DATASETS = {
+    "Liguard Live Demo Dataset (BMS Logs)": "data/bms_simulations/Liguard_Live_Demo_Dataset.csv",
     "Synthetic Runaway (7-min lead-up)": "data/thermal_runaway_data.csv",
     "Battery Archive – Normal Cycling":  "data/external/battery_archive_cycling.csv",
     "NASA – Baseline Aging Sample":      "data/external/nasa_aging_sample.csv",
@@ -179,18 +187,9 @@ def load_dataset(path):
     base = os.path.dirname(__file__)
     for candidate in [path, os.path.join(base, path), os.path.join(base, "..", path)]:
         if os.path.exists(candidate):
-            df = pd.read_csv(candidate, comment="#")
-            df.columns = df.columns.str.lower()
-            for old, new in COL_MAP.items():
-                if old in df.columns and new not in df.columns:
-                    df.rename(columns={old: new}, inplace=True)
-            if "time" not in df.columns:
-                df["time"] = np.arange(len(df))
-            if "temperature" not in df.columns:
-                nums = df.select_dtypes(include=[np.number]).columns.tolist()
-                df["temperature"] = df[nums[-1]] if nums else 0.0
-            df = df[pd.to_numeric(df["time"], errors="coerce").notnull()].copy()
-            df = df.apply(pd.to_numeric, errors="coerce").dropna(subset=["time", "temperature"])
+            # If it's the live demo dataset, don't use comment="#" because of column headers starting with "#"
+            comment_char = None if "Liguard_Live_Demo_Dataset" in candidate else "#"
+            df = pd.read_csv(candidate, comment=comment_char)
             return df
     return None
 
@@ -198,6 +197,56 @@ def make_demo_df():
     t = np.arange(0, 600, 1.0)
     temp = 25 + 0.02 * t + 5 * np.exp((t - 450) / 40) * (t > 450) + np.random.normal(0, 0.3, len(t))
     return pd.DataFrame({"time": t, "temperature": temp})
+
+def process_and_clean_df(df):
+    # Time column parsing, sorting, and duplicate collapsing
+    time_candidates = [c for c in df.columns if c.lower() in ['_time', 'time', 'timestamp', 'test_time (s)']]
+    if time_candidates:
+        time_col = time_candidates[0]
+        if df[time_col].dtype == 'object' or isinstance(df[time_col].dtype, pd.DatetimeTZDtype) or df[time_col].dtype == 'datetime64[ns]':
+            df['_time_parsed'] = pd.to_datetime(df[time_col], format='mixed', errors='coerce')
+            df = df.dropna(subset=['_time_parsed'])
+            df = df.sort_values('_time_parsed').reset_index(drop=True)
+            
+            numeric_cols = df.select_dtypes(include=[np.number]).columns
+            non_numeric_cols = df.select_dtypes(exclude=[np.number]).columns.difference(['_time_parsed'])
+            agg_dict = {col: 'mean' for col in numeric_cols}
+            for col in non_numeric_cols:
+                agg_dict[col] = 'first'
+            df = df.groupby('_time_parsed', as_index=False).agg(agg_dict)
+            df['time'] = (df['_time_parsed'] - df['_time_parsed'].iloc[0]).dt.total_seconds()
+        else:
+            if time_col != 'time':
+                df.rename(columns={time_col: 'time'}, inplace=True)
+            df = df.sort_values('time').reset_index(drop=True)
+    else:
+        df.columns = df.columns.str.lower()
+        for old, new in COL_MAP.items():
+            if old in df.columns and new not in df.columns:
+                df.rename(columns={old: new}, inplace=True)
+        if 'time' not in df.columns:
+            df['time'] = np.arange(len(df))
+
+    # Temperature channel detection and selection
+    temp_cols = [c for c in df.columns if 'temp' in c.lower() or c.lower() in ['t_c', 't', 'temperature_measured']]
+    if temp_cols:
+        if len(temp_cols) > 1:
+            selected_temp_col = st.sidebar.selectbox("Select Temperature Channel", temp_cols, key="mc_temp_select_app")
+        else:
+            selected_temp_col = temp_cols[0]
+    else:
+        numeric = df.select_dtypes(include=[np.number]).columns
+        selected_temp_col = numeric[-1] if len(numeric) > 0 else 'temperature'
+        if selected_temp_col not in df.columns:
+            df[selected_temp_col] = 0.0
+
+    df['temperature'] = df[selected_temp_col]
+    df['temperature'] = df['temperature'].replace(0.0, np.nan)
+    df['temperature'] = df['temperature'].ffill().bfill()
+    
+    df = df[pd.to_numeric(df["time"], errors="coerce").notnull()].copy()
+    df = df.apply(pd.to_numeric, errors="coerce").dropna(subset=["time", "temperature"])
+    return df
 
 # ─── SIDEBAR: dataset selection ──────────────────────────────────────────────
 
@@ -213,20 +262,15 @@ if data_source == "Preloaded":
     if df_raw is None:
         st.sidebar.warning("Dataset not found — using demo trace.")
         df_raw = make_demo_df()
+    df = process_and_clean_df(df_raw)
 else:
     uploaded = st.sidebar.file_uploader("Upload CSV (needs 'time' + 'temperature')", type=["csv"])
     if uploaded:
         df_raw = pd.read_csv(uploaded)
-        df_raw.columns = df_raw.columns.str.lower()
-        for old, new in COL_MAP.items():
-            if old in df_raw.columns and new not in df_raw.columns:
-                df_raw.rename(columns={old: new}, inplace=True)
-        if "time" not in df_raw.columns or "temperature" not in df_raw.columns:
-            st.sidebar.error("CSV must have 'time' and 'temperature' columns.")
-            st.stop()
+        df = process_and_clean_df(df_raw)
     else:
         st.sidebar.info("No file uploaded — using demo trace.")
-        df_raw = make_demo_df()
+        df = process_and_clean_df(make_demo_df())
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**About**")
@@ -234,7 +278,7 @@ st.sidebar.markdown("Four-trigger / five-state thermal runaway early-warning sys
 
 # ─── RUN ENGINE ─────────────────────────────────────────────────────────────
 
-df = apply_noise_smoothing(df_raw.copy())
+df = apply_noise_smoothing(df)
 trig_a = evaluate_trigger_a(df)
 trig_b = evaluate_trigger_b(df)
 trig_c, spike_sig = evaluate_trigger_c(df)
@@ -420,3 +464,29 @@ with st.expander("Prevention simulation & raw metrics", expanded=False):
         fig2.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=30), paper_bgcolor="#0d1117", plot_bgcolor="#0d1117")
         st.plotly_chart(fig2, use_container_width=True)
         st.info("Averted path simulates immediate power-derating + active cooling triggered at 'Watching Brief' state.")
+
+# Secondary visualization: Electrical Load Profile (if columns are present)
+voltage_col = next((c for c in df.columns if 'average_line_to_line_volts' in c.lower() or 'line_to_line_volts' in c.lower()), None)
+current_col = next((c for c in df.columns if 'average_line_current' in c.lower() or 'line_current' in c.lower()), None)
+
+if voltage_col or current_col:
+    st.markdown('<hr class="section-sep">', unsafe_allow_html=True)
+    st.markdown("### ⚡ Synchronized Electrical Load Profile")
+    fig_elec = go.Figure()
+    
+    if voltage_col:
+        fig_elec.add_trace(go.Scatter(x=df['time'], y=df[voltage_col], name="Voltage (V)", line=dict(color="#58a6ff", width=2)))
+    if current_col:
+        fig_elec.add_trace(go.Scatter(x=df['time'], y=df[current_col], name="Current (A)", line=dict(color="#d29922", width=2), yaxis="y2"))
+        
+    fig_elec.update_layout(
+        title="BMS Electrical Monitoring",
+        template="plotly_dark",
+        xaxis_title="Time (seconds)",
+        yaxis=dict(title=dict(text="Voltage (V)", font=dict(color="#58a6ff")), tickfont=dict(color="#58a6ff")),
+        yaxis2=dict(title=dict(text="Current (A)", font=dict(color="#d29922")), tickfont=dict(color="#d29922"), overlaying="y", side="right"),
+        legend=dict(yanchor="top", y=0.99, xanchor="left", x=0.01),
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#0d1117",
+    )
+    st.plotly_chart(fig_elec, use_container_width=True)
