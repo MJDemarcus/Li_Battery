@@ -69,10 +69,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ─── TRIGGER ENGINE (mirrored from app.py v2) ───────────────────────────────
+# ─── TRIGGER ENGINE ─────────────────────────────────────────────────────────
 
 def apply_noise_smoothing(df):
     df = df.copy()
+    # Explicitly convert to standard numpy float64 Series to prevent PyArrow type issues on Streamlit Cloud
+    df["time"] = pd.Series(df["time"].to_numpy(), index=df.index, dtype=np.float64)
+    df["temperature"] = pd.Series(df["temperature"].to_numpy(), index=df.index, dtype=np.float64)
     T_s = df["temperature"].rolling(window=10, min_periods=1).mean()
     df["temp_smooth"] = T_s
     dt = df["time"].diff().fillna(1.0).replace(0, 1.0)
