@@ -206,8 +206,17 @@ def process_and_clean_df(df):
     time_candidates = [c for c in df.columns if c.lower() in ['_time', 'time', 'timestamp', 'test_time (s)']]
     if time_candidates:
         time_col = time_candidates[0]
-        if df[time_col].dtype == 'object' or isinstance(df[time_col].dtype, pd.DatetimeTZDtype) or df[time_col].dtype == 'datetime64[ns]':
-            df['_time_parsed'] = pd.to_datetime(df[time_col], format='mixed', errors='coerce')
+        import pandas.api.types as ptypes
+        
+        is_dt = ptypes.is_datetime64_any_dtype(df[time_col])
+        is_str = ptypes.is_string_dtype(df[time_col]) or ptypes.is_object_dtype(df[time_col])
+        
+        if is_dt or is_str:
+            if is_dt:
+                df['_time_parsed'] = df[time_col]
+            else:
+                df['_time_parsed'] = pd.to_datetime(df[time_col].astype(str), format='mixed', errors='coerce')
+                
             df = df.dropna(subset=['_time_parsed'])
             df = df.sort_values('_time_parsed').reset_index(drop=True)
             
@@ -277,7 +286,7 @@ else:
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("**About**")
-st.sidebar.markdown("Four-trigger / five-state thermal runaway early-warning system. Trigger D (physics ODE residual) provides measurable lead time over simple threshold alarms.")
+st.sidebar.markdown("Four-trigger / five-state early-warning safety machine. Trigger D (physics ODE residual) provides measurable lead time over simple threshold alarms.")
 
 # ─── RUN ENGINE ─────────────────────────────────────────────────────────────
 
